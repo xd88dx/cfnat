@@ -37,11 +37,12 @@ type IPManager struct {
 	currentIP   string
 	currentIdx  int
 	ipAddresses []string
-	statuses    map[string]bool // 最近一轮池内探测结果，true=可用
+	statuses    map[string]bool          // 最近一轮池内探测结果，true=可用
+	rtts        map[string]time.Duration // 最近一轮池内探测的 RTT，缺失=失效/超延迟
 }
 
 func NewIPManager() *IPManager {
-	return &IPManager{statuses: make(map[string]bool)}
+	return &IPManager{statuses: make(map[string]bool), rtts: make(map[string]time.Duration)}
 }
 
 // Replace 用新池原子替换旧池；新池成员默认视为可用（已通过连通性验证）
@@ -79,6 +80,55 @@ func (m *IPManager) SetStatuses(statuses map[string]bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.statuses = statuses
+}
+
+// SetRTTs 写入最近一轮探测的 RTT（缺失 = 失效/超延迟）
+func (m *IPManager) SetRTTs(rtts map[string]time.Duration) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.rtts = rtts
+}
+
+// FastestCandidate 在本轮探测结果中寻找显著快于当前 IP 的候选：
+// RTT 比当前低 30% 以上且绝对差距 >= 50ms，返回其中最快者
+func (m *IPManager) FastestCandidate(rtts map[string]time.Duration) (ip string, bestRTT, curRTT time.Duration, ok bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if m.currentIP == "" {
+		return "", 0, 0, false
+	}
+	cur, alive := rtts[m.currentIP]
+	if !alive {
+		return "", 0, 0, false // 当前 IP 本轮失效，由失效切换逻辑处理
+	}
+	for candidate, r := range rtts {
+		if candidate == m.currentIP {
+			continue
+		}
+		if r*10 < cur*7 && cur-r >= 50*time.Millisecond {
+			if ip == "" || r < bestRTT {
+				ip, bestRTT = candidate, r
+			}
+		}
+	}
+	if ip == "" {
+		return "", 0, 0, false
+	}
+	return ip, bestRTT, cur, true
+}
+
+// SwitchToIP 将当前 IP 切换为池内指定 IP
+func (m *IPManager) SwitchToIP(target string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for i, ip := range m.ipAddresses {
+		if ip == target {
+			log.Printf("择优切换: %s -> %s", m.currentIP, target)
+			m.currentIP = target
+			m.currentIdx = i
+			return
+		}
+	}
 }
 
 // switchToNextHealthyIP 从当前索引之后顺序实拨测试，切到第一个可连通的 IP
@@ -357,9 +407,12 @@ func rescanPool(m *IPManager, locationMap map[string]location, ipsFile string, o
 // monitorLoop 定期探测池内全部 IP：
 //   - 某轮探测中过半 IP 不可用/超延迟 → 触发一次后台全池重扫（扫描期间不重复触发）
 //   - 当前 IP 在探测中失效 → 立即切换到池内下一个可连通 IP
+//   - 池内存在显著更快的 IP（RTT 低 30% 且快 50ms 以上）且连续 2 轮保持 → 择优切换当前 IP
 func monitorLoop(m *IPManager, port int, delay time.Duration, interval time.Duration, triggerRescan func()) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
+
+	fastStreak := 0 // 连续满足择优条件的轮数
 
 	for range ticker.C {
 		ips := m.GetIPAddresses()
@@ -367,21 +420,37 @@ func monitorLoop(m *IPManager, port int, delay time.Duration, interval time.Dura
 			continue
 		}
 
-		statuses := probePool(ips, port, delay)
-		m.SetStatuses(statuses)
+		rtts := probePool(ips, port, delay)
+		m.SetRTTs(rtts)
 
+		statuses := make(map[string]bool, len(ips))
 		bad := 0
-		for _, ok := range statuses {
+		for _, ip := range ips {
+			_, ok := rtts[ip]
+			statuses[ip] = ok
 			if !ok {
 				bad++
 			}
 		}
+		m.SetStatuses(statuses)
 
-		// 当前 IP 失效 → 立即切换
 		cur := m.GetCurrentIP()
-		if ok, exist := statuses[cur]; exist && !ok {
+		if _, curAlive := rtts[cur]; !curAlive {
+			// 当前 IP 失效 → 立即切换
 			log.Printf("当前 IP %s 探测失效", cur)
 			m.switchToNextHealthyIP(port, delay)
+			fastStreak = 0
+		} else if bestIP, bestRTT, curRTT, ok := m.FastestCandidate(rtts); ok {
+			// 择优切换：连续 2 轮显著更快才切，防单轮网络抖动
+			fastStreak++
+			log.Printf("池内存在更快 IP: %s(%dms) vs 当前 %s(%dms)，连续第 %d 轮",
+				bestIP, bestRTT.Milliseconds(), cur, curRTT.Milliseconds(), fastStreak)
+			if fastStreak >= 2 {
+				m.SwitchToIP(bestIP)
+				fastStreak = 0
+			}
+		} else {
+			fastStreak = 0
 		}
 
 		// 过半质量不足 → 后台重扫（atomic 标志防重复触发）
@@ -399,11 +468,11 @@ func monitorLoop(m *IPManager, port int, delay time.Duration, interval time.Dura
 	}
 }
 
-// probePool 并发探测池内所有 IP：TCP 可达且 RTT <= delay 视为可用
-func probePool(ips []string, port int, delay time.Duration) map[string]bool {
+// probePool 并发探测池内所有 IP：返回拨号成功的 RTT（失败或 RTT>delay 的 IP 不入结果）
+func probePool(ips []string, port int, delay time.Duration) map[string]time.Duration {
 	var wg sync.WaitGroup
 	var mu sync.Mutex
-	statuses := make(map[string]bool, len(ips))
+	rtts := make(map[string]time.Duration, len(ips))
 
 	for _, ip := range ips {
 		wg.Add(1)
@@ -412,21 +481,20 @@ func probePool(ips []string, port int, delay time.Duration) map[string]bool {
 			start := time.Now()
 			conn, err := net.DialTimeout("tcp", net.JoinHostPort(ipAddr, fmt.Sprintf("%d", port)), delay)
 			if err != nil {
-				mu.Lock()
-				statuses[ipAddr] = false
-				mu.Unlock()
 				return
 			}
 			rtt := time.Since(start)
 			conn.Close()
-			mu.Lock()
-			statuses[ipAddr] = rtt <= delay
-			mu.Unlock()
+			if rtt <= delay {
+				mu.Lock()
+				rtts[ipAddr] = rtt
+				mu.Unlock()
+			}
 		}(ip)
 	}
 
 	wg.Wait()
-	return statuses
+	return rtts
 }
 
 // tcpOK 验证 IP:port TCP 可达且 RTT 在 delay 内
