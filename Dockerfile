@@ -1,42 +1,37 @@
-# 第一个阶段用于根据架构复制文件
-FROM --platform=$TARGETPLATFORM alpine:3.19 AS builder
+# syntax=docker/dockerfile:1
 
-# 设置构建参数
-ARG TARGETPLATFORM
+# ============ 构建阶段：从修正版源码编译 ============
+FROM --platform=$BUILDPLATFORM golang:1.22-alpine AS builder
+
+ARG TARGETOS
 ARG TARGETARCH
 ARG TARGETVARIANT
 
-# 复制二进制文件 - 修改复制路径
-COPY /cfnat/* ./app/
-COPY /go.sh ./go.sh
-COPY /ips-v4.txt ./ips-v4.txt
-COPY /ips-v6.txt ./ips-v6.txt
-COPY /locations.json ./locations.json
+WORKDIR /src
 
-# 添加调试信息
-RUN echo "Files in builder:" && ls -la
+# 仅复制源码，仓库内闭源旧二进制不再使用
+COPY src/go.mod src/go.mod
+COPY src/cfnat.go src/cfnat.go
 
-# 检查文件是否存在并根据目标架构重命名二进制文件
-RUN ls -la && \
-    if [ "$TARGETARCH" = "amd64" ]; then mv ./app/cfnat-linux-amd64 ./cfnat; \
-    elif [ "$TARGETARCH" = "386" ]; then mv ./app/cfnat-linux-386 ./cfnat; \
-    elif [ "$TARGETARCH" = "arm64" ]; then mv ./app/cfnat-linux-arm64 ./cfnat; \
-    elif [ "$TARGETARCH" = "arm" ] && [ "$TARGETVARIANT" = "v6" ]; then mv ./app/cfnat-linux-armv6 ./cfnat; \
-    elif [ "$TARGETARCH" = "arm" ] && [ "$TARGETVARIANT" = "v7" ]; then mv ./app/cfnat-linux-armv7 ./cfnat; \
-    else echo "无法识别架构，默认使用 amd64" && mv ./app/cfnat-linux-amd64 ./cfnat; \
-    fi
+# CGO 关闭以产出静态二进制；armv6/v7 通过 GOARM 区分
+RUN apk add --no-cache git && \
+    case "$TARGETVARIANT" in \
+        v6) export GOARM=6 ;; \
+        v7) export GOARM=7 ;; \
+    esac && \
+    cd src && \
+    CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
+    go build -trimpath -ldflags "-s -w" -o /cfnat .
 
-# 第二个阶段：运行阶段
+# ============ 运行阶段 ============
 FROM --platform=$TARGETPLATFORM alpine:3.19
 
-# 复制构建阶段的文件到运行阶段
 COPY --from=builder /cfnat ./cfnat
-COPY --from=builder /ips-v4.txt ./ips-v4.txt
-COPY --from=builder /ips-v6.txt ./ips-v6.txt
-COPY --from=builder /locations.json ./locations.json
-COPY --from=builder /go.sh ./go.sh
+COPY go.sh ./go.sh
+COPY ips-v4.txt ./ips-v4.txt
+COPY ips-v6.txt ./ips-v6.txt
+COPY locations.json ./locations.json
 
-# 赋予可执行权限
 RUN chmod +x ./cfnat ./go.sh
 
 # 设置环境变量默认值
@@ -46,6 +41,7 @@ ENV colo="SJC,LAX,HKG" \
     ips="4" \
     num="10" \
     port="443" \
+    probe="60" \
     random="true" \
     task="100" \
     tls="true" \

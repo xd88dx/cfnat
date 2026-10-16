@@ -15,8 +15,9 @@ echo "随机IP(random): $random"
 echo "数据中心(colo): $colo_upper"
 echo "有效延迟(delay): $delay"
 echo "转发端口(port): $port"
-echo "有效IP数(ipnum): $ipnum"
 echo "负载IP数(num): $num"
+echo "池大小(ipnum): $ipnum"
+echo "探测间隔(probe): $probe"
 echo "最大并发请求数(task): $task"
 echo "响应状态码(code): $code"
 echo "检查域名(domain): $domain"
@@ -36,6 +37,7 @@ do
         -addr="0.0.0.0:1234" \
         -ipnum="$ipnum" \
         -num="$num" \
+        -probe="$probe" \
         -random="$random" \
         -task="$task" \
         -tls="$tls" \
