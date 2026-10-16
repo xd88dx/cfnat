@@ -36,6 +36,10 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Generate date tag
+        id: datetag
+        run: echo "tag=$(TZ=Asia/Shanghai date +'%y.%m.%d')" >> "$GITHUB_OUTPUT"
+
       - name: Build and push multi-arch Docker image
         uses: docker/build-push-action@v5
         with:
@@ -44,6 +48,6 @@ jobs:
           platforms: linux/amd64,linux/arm64,linux/386,linux/arm/v6,linux/arm/v7
           tags: |
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:source-${{ github.sha }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.datetag.outputs.tag }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
