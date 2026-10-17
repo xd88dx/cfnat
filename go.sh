@@ -18,6 +18,8 @@ echo "转发端口(port): $port"
 echo "负载IP数(num): $num"
 echo "池大小(ipnum): $ipnum"
 echo "探测间隔(probe): $probe"
+echo "探测次数(proben): ${proben:-3}"
+echo "丢包阈值(loss): ${loss:-20}%"
 echo "最大并发请求数(task): $task"
 echo "响应状态码(code): $code"
 echo "检查域名(domain): $domain"
@@ -38,6 +40,8 @@ do
         -ipnum="$ipnum" \
         -num="$num" \
         -probe="$probe" \
+        -proben="${proben:-3}" \
+        -loss="${loss:-20}" \
         -random="$random" \
         -task="$task" \
         -tls="$tls" \

@@ -17,6 +17,13 @@
         负载IP数: 目标负载 IP 数量 (default 10)
   -port int
         转发目标端口 (default 443)
+  -probe int
+        池内探测间隔（秒） (default 60)
+  -proben int
+        每轮池内探测对每个 IP 的握手次数，用于估算丢包率 (default 3)
+  -loss int
+        丢包率阈值（百分比）: 探测丢包超过此值视为质量不足，
+        当前 IP 连续 2 轮超阈值且池内存在显著更低丢包（≤当前一半且 ≤10%）的候选时切换 (default 20)
   -random
         是否随机生成IP，如果为false，则从CIDR中拆分出所有IP (default true)
   -tls
